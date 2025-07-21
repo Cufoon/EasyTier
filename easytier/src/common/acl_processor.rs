@@ -230,7 +230,7 @@ pub struct AclProcessor {
 }
 
 impl AclProcessor {
-    pub fn new(acl_config: Acl) -> Self {
+    fn do_new(acl_config: Acl) -> Self {
         let processor = Self {
             inbound_rules: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             outbound_rules: Arc::new(RwLock::new(Arc::new(Vec::new()))),
@@ -244,13 +244,12 @@ impl AclProcessor {
             stats: Arc::new(DashMap::new()),
         };
 
-        // Note: Use new_with_async_init for proper async initialization
         processor
     }
 
     /// Create a new ACL processor with async initialization
-    pub async fn new_with_async_init(acl_config: Acl) -> Self {
-        let processor = Self::new(acl_config.clone());
+    pub fn new(acl_config: Acl) -> Self {
+        let processor = Self::do_new(acl_config.clone());
         processor.reload_rules(&acl_config);
         processor.start_cache_cleanup_task();
         processor
@@ -266,13 +265,13 @@ impl AclProcessor {
             let mut interval = tokio::time::interval(cleanup_interval);
             loop {
                 interval.tick().await;
-                Self::cleanup_cache(&rule_cache, cache_max_size).await;
+                Self::cleanup_cache(&rule_cache, cache_max_size);
             }
         });
     }
 
     /// Clean up cache using LRU strategy
-    async fn cleanup_cache(cache: &DashMap<AclCacheKey, AclCacheEntry>, max_size: usize) {
+    fn cleanup_cache(cache: &DashMap<AclCacheKey, AclCacheEntry>, max_size: usize) {
         let current_size = cache.len();
         if current_size <= max_size {
             return;
@@ -348,11 +347,7 @@ impl AclProcessor {
     }
 
     /// Process a packet through ACL rules
-    pub async fn process_packet(
-        &self,
-        packet_info: &PacketInfo,
-        chain_type: ChainType,
-    ) -> AclResult {
+    pub fn process_packet(&self, packet_info: &PacketInfo, chain_type: ChainType) -> AclResult {
         // Check cache first for performance
         let cache_key = AclCacheKey::from_packet_info(packet_info, chain_type);
 
@@ -504,7 +499,7 @@ impl AclProcessor {
             let cache = self.rule_cache.clone();
             let max_size = self.cache_max_size;
             tokio::spawn(async move {
-                Self::cleanup_cache(&cache, max_size).await;
+                Self::cleanup_cache(&cache, max_size);
             });
         }
     }
@@ -721,7 +716,7 @@ impl AclProcessor {
     }
 
     /// Clean up expired connection tracking entries
-    pub async fn cleanup_expired_connections(&self, timeout_secs: u64) {
+    pub fn cleanup_expired_connections(&self, timeout_secs: u64) {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -744,8 +739,8 @@ impl AclProcessor {
     }
 
     /// Force cache cleanup (for manual management)
-    pub async fn cleanup_cache_now(&self) {
-        Self::cleanup_cache(&self.rule_cache, self.cache_max_size).await;
+    pub fn cleanup_cache_now(&self) {
+        Self::cleanup_cache(&self.rule_cache, self.cache_max_size);
     }
 
     /// Get cache hit rate
@@ -890,8 +885,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_acl_cache_key_creation() {
+    #[test]
+    fn test_acl_cache_key_creation() {
         let packet_info = create_test_packet_info();
         let cache_key = AclCacheKey::from_packet_info(&packet_info, ChainType::Inbound);
 
@@ -906,8 +901,8 @@ mod tests {
         assert_eq!(cache_key.dst_port, 80);
     }
 
-    #[tokio::test]
-    async fn test_acl_cache_key_equality() {
+    #[test]
+    fn test_acl_cache_key_equality() {
         let packet_info1 = create_test_packet_info();
         let packet_info2 = create_test_packet_info();
 
@@ -928,12 +923,10 @@ mod tests {
     #[tokio::test]
     async fn test_acl_processor_basic_functionality() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
-        let result = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result = processor.process_packet(&packet_info, ChainType::Inbound);
 
         assert_eq!(result.action, Action::Allow);
         assert!(result.matched_rule.is_some());
@@ -942,18 +935,14 @@ mod tests {
     #[tokio::test]
     async fn test_acl_cache_hit() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // First request - should be a cache miss
-        let result1 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&packet_info, ChainType::Inbound);
 
         // Second request - should be a cache hit
-        let result2 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result2 = processor.process_packet(&packet_info, ChainType::Inbound);
 
         assert_eq!(result1.action, result2.action);
         assert_eq!(result1.matched_rule, result2.matched_rule);
@@ -967,7 +956,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache_cleanup() {
         let acl_config = create_test_acl_config();
-        let mut processor = AclProcessor::new_with_async_init(acl_config).await;
+        let mut processor = AclProcessor::new(acl_config);
         processor.cache_max_size = 2; // Small cache for testing
 
         let packet_info1 = PacketInfo {
@@ -996,18 +985,12 @@ mod tests {
         };
 
         // Process packets to fill cache beyond max size
-        processor
-            .process_packet(&packet_info1, ChainType::Inbound)
-            .await;
-        processor
-            .process_packet(&packet_info2, ChainType::Inbound)
-            .await;
-        processor
-            .process_packet(&packet_info3, ChainType::Inbound)
-            .await;
+        processor.process_packet(&packet_info1, ChainType::Inbound);
+        processor.process_packet(&packet_info2, ChainType::Inbound);
+        processor.process_packet(&packet_info3, ChainType::Inbound);
 
         // Trigger cache cleanup
-        processor.cleanup_cache_now().await;
+        processor.cleanup_cache_now();
 
         // Cache should be reduced
         let stats = processor.get_stats();
@@ -1018,24 +1001,20 @@ mod tests {
     #[tokio::test]
     async fn test_different_chain_types() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // Test inbound - should match our rule
-        let inbound_result = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let inbound_result = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(inbound_result.action, Action::Allow);
 
         // Test outbound - should get default drop (no outbound rules)
-        let outbound_result = processor
-            .process_packet(&packet_info, ChainType::Outbound)
-            .await;
+        let outbound_result = processor.process_packet(&packet_info, ChainType::Outbound);
         assert_eq!(outbound_result.action, Action::Drop);
     }
 
-    #[tokio::test]
-    async fn test_cache_entry_with_timestamp() {
+    #[test]
+    fn test_cache_entry_with_timestamp() {
         let entry = AclCacheEntry {
             action: Action::Allow,
             matched_rule: RuleId::Priority(100),
@@ -1058,8 +1037,8 @@ mod tests {
         assert!(entry.can_skip_checks());
     }
 
-    #[tokio::test]
-    async fn test_packet_info_hash_consistency() {
+    #[test]
+    fn test_packet_info_hash_consistency() {
         let packet_info1 = PacketInfo {
             src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -1096,15 +1075,13 @@ mod tests {
     #[tokio::test]
     async fn test_statistics_tracking() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
 
         let packet_info = create_test_packet_info();
 
         // Process same packet multiple times to test caching and statistics
         for _ in 0..5 {
-            processor
-                .process_packet(&packet_info, ChainType::Inbound)
-                .await;
+            processor.process_packet(&packet_info, ChainType::Inbound);
         }
 
         let stats = processor.get_stats();
@@ -1124,12 +1101,10 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_log_context() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
-        let result = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result = processor.process_packet(&packet_info, ChainType::Inbound);
 
         // Verify log context is created but message is not yet constructed
         assert!(result.log_context.is_some());
@@ -1143,8 +1118,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_different_log_contexts() {
+    #[test]
+    fn test_different_log_contexts() {
         let packet_info = create_test_packet_info();
 
         // Test StatefulMatch context
@@ -1179,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn test_enum_based_statistics() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
 
         // Test enum-based statistics
         processor.increment_stat(AclStatKey::PacketsTotal);
@@ -1249,13 +1224,11 @@ mod tests {
             acl_v1.chains[0].rules.push(rule);
         }
 
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // First request - should create a new connection entry
-        let result1 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result1.action, Action::Allow);
 
         // Check that a connection tracking entry was created
@@ -1269,9 +1242,7 @@ mod tests {
         assert!(processor.conn_track.contains_key(&conn_key));
 
         // Second request - should still process stateful check even if cache hit
-        let result2 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result2 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result2.action, Action::Allow);
 
         // Verify that the connection entry was updated (packet count increased)
@@ -1298,24 +1269,18 @@ mod tests {
             acl_v1.chains[0].rules.push(rule);
         }
 
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // First two requests should be allowed
-        let result1 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result1.action, Action::Allow);
 
-        let result2 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result2 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result2.action, Action::Allow);
 
         // Third request should be rate limited and dropped
-        let result3 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result3 = processor.process_packet(&packet_info, ChainType::Inbound);
         // This should be dropped due to rate limiting
         assert_eq!(result3.action, Action::Drop);
         assert!(result3.log_context.is_some());
@@ -1345,14 +1310,12 @@ mod tests {
             acl_v1.chains[0].rules.push(rule);
         }
 
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // Process multiple packets
         for i in 0..3 {
-            let result = processor
-                .process_packet(&packet_info, ChainType::Inbound)
-                .await;
+            let result = processor.process_packet(&packet_info, ChainType::Inbound);
             assert_eq!(
                 result.action,
                 Action::Allow,
@@ -1400,13 +1363,11 @@ mod tests {
     #[tokio::test]
     async fn test_cache_optimization_for_simple_rules() {
         let acl_config = create_test_acl_config(); // This creates a simple allow_all rule
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // First request - cache miss
-        let result1 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result1.action, Action::Allow);
 
         // Verify cache entry properties
@@ -1424,9 +1385,7 @@ mod tests {
         }
 
         // Second request - should be served from cache without additional processing
-        let result2 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result2 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result2.action, Action::Allow);
 
         // Verify cache hit statistics
@@ -1480,7 +1439,7 @@ mod tests {
         acl_v1.chains.push(chain);
         acl_config.acl_v1 = Some(acl_v1);
 
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
 
         // Test 1: Security-critical packets (TCP) - should always process stateful + rate limiting
         let tcp_packet = PacketInfo {
@@ -1494,9 +1453,7 @@ mod tests {
 
         // Process TCP packets multiple times - should maintain connection tracking
         for i in 0..5 {
-            let result = processor
-                .process_packet(&tcp_packet, ChainType::Inbound)
-                .await;
+            let result = processor.process_packet(&tcp_packet, ChainType::Inbound);
             assert_eq!(
                 result.action,
                 Action::Allow,
@@ -1531,16 +1488,12 @@ mod tests {
         };
 
         // First UDP packet - cache miss
-        let result1 = processor
-            .process_packet(&udp_packet, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&udp_packet, ChainType::Inbound);
         assert_eq!(result1.action, Action::Allow);
 
         // Subsequent UDP packets - should hit cache and skip processing
         for _ in 0..10 {
-            let result = processor
-                .process_packet(&udp_packet, ChainType::Inbound)
-                .await;
+            let result = processor.process_packet(&udp_packet, ChainType::Inbound);
             assert_eq!(result.action, Action::Allow);
         }
 
@@ -1595,8 +1548,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_rate_limit_drop_log_context() {
+    #[test]
+    fn test_rate_limit_drop_log_context() {
         // Test that RateLimitDrop log context is properly created
         let context = AclLogContext::RateLimitDrop;
         let message = context.to_message();
@@ -1621,20 +1574,16 @@ mod tests {
             acl_v1.chains[0].rules.push(rule);
         }
 
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
         let packet_info = create_test_packet_info();
 
         // First request should be allowed
-        let result1 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result1 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result1.action, Action::Allow);
         assert_eq!(result1.matched_rule, Some(RuleId::Priority(200)));
 
         // Second request should be rate limited and dropped immediately
-        let result2 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result2 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result2.action, Action::Drop);
         assert_eq!(result2.matched_rule, Some(RuleId::Priority(200)));
         assert!(!result2.should_log);
@@ -1651,9 +1600,7 @@ mod tests {
         }
 
         // Third request should also be rate limited
-        let result3 = processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let result3 = processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(result3.action, Action::Drop);
         assert!(matches!(
             result3.log_context,
@@ -1664,8 +1611,8 @@ mod tests {
         println!("✓ RateLimitDrop log context is correctly generated");
     }
 
-    #[tokio::test]
-    async fn test_performance_optimizations() {
+    #[test]
+    fn test_performance_optimizations() {
         // Test that RuleId avoids unnecessary string allocations
         let rule_id = RuleId::Priority(12345);
         let stateful_id = RuleId::Stateful(54321);
@@ -1705,7 +1652,7 @@ mod tests {
     #[tokio::test]
     async fn test_zero_copy_rule_access() {
         let acl_config = create_test_acl_config();
-        let processor = AclProcessor::new_with_async_init(acl_config).await;
+        let processor = AclProcessor::new(acl_config);
 
         // Verify that rules are stored in Arc for efficient sharing
         let rules1 = processor.inbound_rules.read().clone();

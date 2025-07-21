@@ -1,4 +1,8 @@
-use std::{net::IpAddr, sync::Arc};
+use std::sync::atomic::Ordering;
+use std::{
+    net::IpAddr,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use async_trait::async_trait;
 use pnet::packet::{
@@ -11,7 +15,7 @@ use crate::{
         global_ctx::ArcGlobalCtx,
     },
     peers::{NicPacketFilter, PeerPacketFilter},
-    proto::acl::{Action, ChainType},
+    proto::acl::{Acl, Action, ChainType},
     tunnel::packet_def::ZCPacket,
 };
 
@@ -137,12 +141,16 @@ impl AclFilter {
     }
 
     /// Common ACL processing logic
-    async fn process_packet_with_acl(
+    fn process_packet_with_acl(
         &self,
         packet: &ZCPacket,
         chain_type: ChainType,
         context: &str,
     ) -> Result<PacketInfo, ()> {
+        if !self.acl_enabled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // Extract packet information
         let packet_info = match self.extract_packet_info(packet) {
             Some(info) => info,
@@ -153,10 +161,7 @@ impl AclFilter {
         };
 
         // Process through ACL rules
-        let acl_result = self
-            .acl_processor
-            .process_packet(&packet_info, chain_type)
-            .await;
+        let acl_result = self.acl_processor.process_packet(&packet_info, chain_type);
 
         self.handle_acl_result(&acl_result, &packet_info, chain_type);
 
@@ -182,9 +187,7 @@ impl AclFilter {
 impl PeerPacketFilter for AclFilter {
     async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
         // Process through ACL rules for inbound traffic
-        let result = self
-            .process_packet_with_acl(&packet, ChainType::Inbound, "peer")
-            .await;
+        let result = self.process_packet_with_acl(&packet, ChainType::Inbound, "peer");
 
         match result {
             Ok(_) => Some(packet), // Continue processing
@@ -197,9 +200,7 @@ impl PeerPacketFilter for AclFilter {
 impl NicPacketFilter for AclFilter {
     async fn try_process_packet_from_nic(&self, packet: &mut ZCPacket) -> bool {
         // Process through ACL rules for outbound traffic
-        let result = self
-            .process_packet_with_acl(packet, ChainType::Outbound, "nic")
-            .await;
+        let result = self.process_packet_with_acl(packet, ChainType::Outbound, "nic");
 
         match result {
             Ok(_) => false, // Continue processing in pipeline
@@ -209,21 +210,31 @@ impl NicPacketFilter for AclFilter {
 }
 
 /// Forward filter for routing decisions
+#[derive(Clone)]
 pub struct AclForwardFilter {
     acl_processor: Arc<AclProcessor>,
-    global_ctx: ArcGlobalCtx,
+    acl_enabled: Arc<AtomicBool>,
 }
 
 impl AclForwardFilter {
-    pub fn new(acl_processor: Arc<AclProcessor>, global_ctx: ArcGlobalCtx) -> Self {
+    pub fn new() -> Self {
         Self {
-            acl_processor,
-            global_ctx,
+            acl_processor: Arc::new(AclProcessor::new(Acl::default())),
+            acl_enabled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn reload_rules(&self, acl_config: &Acl) {
+        self.acl_processor.reload_rules(acl_config);
+        self.acl_enabled.store(true, Ordering::Relaxed);
     }
 
     /// Check if a packet should be forwarded based on ACL rules
     pub async fn should_forward_packet(&self, packet: &ZCPacket) -> bool {
+        if !self.acl_enabled.load(Ordering::Relaxed) {
+            return true;
+        }
+
         let packet_info = match self.extract_packet_info(packet) {
             Some(info) => info,
             None => return false,
@@ -231,8 +242,7 @@ impl AclForwardFilter {
 
         let acl_result = self
             .acl_processor
-            .process_packet(&packet_info, ChainType::Forward)
-            .await;
+            .process_packet(&packet_info, ChainType::Forward);
 
         match acl_result.action {
             Action::Allow | Action::Noop => true,
@@ -310,8 +320,6 @@ mod tests {
         acl_v1.chains.push(chain);
         acl_config.acl_v1 = Some(acl_v1);
 
-        let _acl_processor = Arc::new(AclProcessor::new(acl_config));
-
         // Test would require creating a mock GlobalCtx and ZCPacket
         // This is a basic structure demonstration
     }
@@ -360,7 +368,7 @@ mod tests {
         acl_v1.chains.push(outbound_chain);
         acl_config.acl_v1 = Some(acl_v1);
 
-        let acl_processor = Arc::new(AclProcessor::new_with_async_init(acl_config).await);
+        let acl_processor = Arc::new(AclProcessor::new(acl_config));
 
         // Create test packet info
         let packet_info = PacketInfo {
@@ -373,15 +381,11 @@ mod tests {
         };
 
         // Test inbound processing (should allow)
-        let inbound_result = acl_processor
-            .process_packet(&packet_info, ChainType::Inbound)
-            .await;
+        let inbound_result = acl_processor.process_packet(&packet_info, ChainType::Inbound);
         assert_eq!(inbound_result.action, Action::Allow);
 
         // Test outbound processing (should drop)
-        let outbound_result = acl_processor
-            .process_packet(&packet_info, ChainType::Outbound)
-            .await;
+        let outbound_result = acl_processor.process_packet(&packet_info, ChainType::Outbound);
         assert_eq!(outbound_result.action, Action::Drop);
 
         // Check statistics
